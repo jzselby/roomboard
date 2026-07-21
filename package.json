@@ -1,0 +1,22 @@
+{
+  "name": "meal-scale",
+  "version": "1.0.0",
+  "description": "Room & Board clearance sofa stock monitor",
+  "main": "monitor.js",
+  "scripts": {
+    "start": "node monitor.js",
+    "check": "node monitor.js --once"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:41729/git/jzselby/meal-scale"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "nodemailer": "^9.0.3",
+    "playwright-core": "^1.61.1"
+  }
+}
