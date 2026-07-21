@@ -1,0 +1,26 @@
+name: Sofa Monitor
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - run: node monitor.js --once
+        env:
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: '465'
+          SMTP_SECURE: 'true'
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          TZ: America/Chicago
