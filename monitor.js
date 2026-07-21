@@ -1,6 +1,9 @@
 require('dotenv').config();
-const { chromium } = require('playwright-core');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const nodemailer = require('nodemailer');
+
+chromium.use(StealthPlugin());
 
 const TARGET_URL = 'https://www.roomandboard.com/clearance/living/sofas-and-loveseats';
 const INTERVAL_MS = 10 * 60 * 1000;
@@ -21,17 +24,42 @@ async function scrapeProducts() {
   const browser = await chromium.launch({
     executablePath: CHROMIUM_PATH,
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+    ],
   });
 
   try {
-    const page = await browser.newPage();
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      viewport: { width: 1440, height: 900 },
+      locale: 'en-US',
+      timezoneId: 'America/Chicago',
+    });
+    const page = await context.newPage();
+
+    // Navigate and handle bot detection with retries
+    let blocked = true;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
+      const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+      if (!bodyText.includes('Just Checking') && !bodyText.includes('confirm you\'re human')) {
+        blocked = false;
+        break;
+      }
+      console.log(`  Bot detection triggered (attempt ${attempt}/3), waiting ${attempt * 5}s...`);
+      await page.waitForTimeout(attempt * 5000);
+    }
+
+    if (blocked) {
+      console.log('  WARNING: Bot detection persists after retries, results may be empty');
+    }
 
     // Wait for product grid to render
     await page.waitForSelector('a[href*="/clearance/"]', { timeout: 15000 }).catch(() => {});
-    // Give JS time to hydrate
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(2000);
 
     // Gather all product links from the listing page
     const productLinks = await page.evaluate(() => {
