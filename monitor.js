@@ -33,7 +33,10 @@ function extractProductsFromNextData(nextData) {
   })).filter(p => {
     if (!p.name) return false;
     const priceNum = parseFloat(p.price.replace(/[$,]/g, ''));
-    return isNaN(priceNum) || priceNum < 2000;
+    if (!isNaN(priceNum) && priceNum >= 2000) return false;
+    const inchMatch = p.name.match(/(\d+)[\s\-]*(inch|in\b|")/i);
+    if (!inchMatch) return false;
+    return parseInt(inchMatch[1]) > 80;
   });
 }
 
@@ -79,7 +82,7 @@ function formatEmailHtml(products, timestamp) {
 
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
       <h2 style="color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:8px">Room & Board Clearance Sofas</h2>
-      <p style="color:#7f8c8d;font-size:14px">Checked at ${timestamp} &bull; ${products.length} item(s) under $2,000</p>
+      <p style="color:#7f8c8d;font-size:14px">Checked at ${timestamp} &bull; ${products.length} item(s) found</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px">
         <thead><tr style="background:#f8f9fa;text-align:left">
           <th style="padding:10px 8px;border-bottom:2px solid #dee2e6">Product</th>
