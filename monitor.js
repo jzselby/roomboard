@@ -33,7 +33,10 @@ function extractProductsFromNextData(nextData) {
   })).filter(p => {
     if (!p.name) return false;
     const priceNum = parseFloat(p.price.replace(/[$,]/g, ''));
-    return isNaN(priceNum) || priceNum < 2000;
+    if (!isNaN(priceNum) && priceNum >= 2000) return false;
+    const inchMatch = p.name.match(/(\d+)[\s\-]*(inch|in\b|")/i);
+    if (!inchMatch) return false;
+    return parseInt(inchMatch[1]) > 80;
   });
 }
 
