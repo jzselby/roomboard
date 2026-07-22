@@ -9,13 +9,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/jzselby/roomboard"
+    "url": "http://local_proxy@127.0.0.1:41729/git/jzselby/meal-scale"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
     "nodemailer": "^9.0.3"
   }
