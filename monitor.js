@@ -30,7 +30,11 @@ function extractProductsFromNextData(nextData) {
     url: `https://www.roomandboard.com/clearance/living/sofas-and-loveseats/${p.url || p.articleNumber}`,
     stockInfo: p.status?.status || '',
     sku: p.articleNumber || '',
-  })).filter(p => p.name);
+  })).filter(p => {
+    if (!p.name) return false;
+    const priceNum = parseFloat(p.price.replace(/[$,]/g, ''));
+    return isNaN(priceNum) || priceNum < 2000;
+  });
 }
 
 async function fetchProducts() {
@@ -75,7 +79,7 @@ function formatEmailHtml(products, timestamp) {
 
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
       <h2 style="color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:8px">Room & Board Clearance Sofas</h2>
-      <p style="color:#7f8c8d;font-size:14px">Checked at ${timestamp} &bull; ${products.length} item(s) found</p>
+      <p style="color:#7f8c8d;font-size:14px">Checked at ${timestamp} &bull; ${products.length} item(s) under $2,000</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px">
         <thead><tr style="background:#f8f9fa;text-align:left">
           <th style="padding:10px 8px;border-bottom:2px solid #dee2e6">Product</th>
@@ -84,7 +88,7 @@ function formatEmailHtml(products, timestamp) {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="color:#95a5a6;font-size:12px;margin-top:20px"><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a> &bull; Next check in 10 minutes</p>
+      <p style="color:#95a5a6;font-size:12px;margin-top:20px"><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a> &bull; Next check in 1 hour</p>
     </div>`;
 }
 
