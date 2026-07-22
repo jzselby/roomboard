@@ -20,14 +20,29 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+function randomDelay(min, max) {
+  return Math.floor(Math.random() * (max - min) + min);
+}
+
+async function humanScroll(page) {
+  const scrolls = randomDelay(2, 5);
+  for (let i = 0; i < scrolls; i++) {
+    await page.mouse.wheel(0, randomDelay(200, 500));
+    await page.waitForTimeout(randomDelay(300, 800));
+  }
+}
+
 async function scrapeProducts() {
+  const useHeaded = process.env.DISPLAY || process.env.HEADED === 'true';
   const browser = await chromium.launch({
     executablePath: CHROMIUM_PATH,
-    headless: true,
+    headless: !useHeaded,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-blink-features=AutomationControlled',
+      '--disable-dev-shm-usage',
+      '--window-size=1440,900',
     ],
   });
 
@@ -37,25 +52,50 @@ async function scrapeProducts() {
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
       timezoneId: 'America/Chicago',
+      javaScriptEnabled: true,
+      extraHTTPHeaders: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+      },
     });
     const page = await context.newPage();
 
-    // Navigate and handle bot detection with retries
-    let blocked = true;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
-      const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
-      if (!bodyText.includes('Just Checking') && !bodyText.includes('confirm you\'re human')) {
-        blocked = false;
-        break;
-      }
-      console.log(`  Bot detection triggered (attempt ${attempt}/3), waiting ${attempt * 5}s...`);
-      await page.waitForTimeout(attempt * 5000);
-    }
+    // First visit the homepage to get cookies, like a real user
+    console.log('  Visiting homepage first...');
+    await page.goto('https://www.roomandboard.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(randomDelay(2000, 4000));
+    await humanScroll(page);
+    await page.waitForTimeout(randomDelay(1000, 2000));
+
+    // Now navigate to the clearance page
+    console.log('  Navigating to clearance sofas...');
+    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
+    await page.waitForTimeout(randomDelay(2000, 4000));
+
+    // Check for bot detection
+    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+    const blocked = bodyText.includes('Just Checking') || bodyText.includes("confirm you're human");
 
     if (blocked) {
-      console.log('  WARNING: Bot detection persists after retries, results may be empty');
+      console.log('  Bot detection triggered, waiting and retrying...');
+      await page.waitForTimeout(10000);
+      await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(5000);
+      const retryText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+      if (retryText.includes('Just Checking') || retryText.includes("confirm you're human")) {
+        console.log('  WARNING: Still blocked by bot detection');
+        return [];
+      }
     }
+
+    await humanScroll(page);
+    await page.waitForTimeout(randomDelay(1000, 2000));
 
     // Wait for product grid to render
     await page.waitForSelector('a[href*="/clearance/"]', { timeout: 15000 }).catch(() => {});
@@ -68,7 +108,6 @@ async function scrapeProducts() {
       document.querySelectorAll('a').forEach(a => {
         const href = a.href;
         if (!href || seen.has(href)) return;
-        // Match clearance product detail links (they typically have a SKU-like path)
         if (href.includes('/clearance/') && href.split('/').length > 5) {
           const text = a.textContent.trim().replace(/\s+/g, ' ').substring(0, 200);
           if (text.length > 2) {
@@ -83,7 +122,6 @@ async function scrapeProducts() {
     // Also try to grab product cards from the listing grid
     const gridProducts = await page.evaluate(() => {
       const products = [];
-      // Common patterns for product grids on furniture sites
       const selectors = [
         '[data-testid*="product"]',
         '[class*="ProductCard"]',
@@ -125,10 +163,8 @@ async function scrapeProducts() {
       return products;
     });
 
-    // Visit each product page to get detailed stock info
     const detailedProducts = [];
 
-    // Deduplicate links - prefer gridProducts links, fall back to productLinks
     const allLinks = new Map();
     for (const p of gridProducts) {
       if (p.link) allLinks.set(p.link, { name: p.name, price: p.price, stock: p.stock });
@@ -140,28 +176,20 @@ async function scrapeProducts() {
     }
 
     if (allLinks.size === 0) {
-      // Fallback: grab the full page text to help debug
-      const bodyText = await page.evaluate(() =>
+      const pageText = await page.evaluate(() =>
         document.body.innerText.substring(0, 3000)
       );
       console.log('[DEBUG] No product links found. Page text preview:');
-      console.log(bodyText);
-
-      // Try getting all links on the page for debugging
-      const allPageLinks = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('a[href]'))
-          .map(a => ({ href: a.href, text: a.textContent.trim().substring(0, 80) }))
-          .filter(a => a.text.length > 0)
-          .slice(0, 50);
-      });
-      console.log('[DEBUG] All links:', JSON.stringify(allPageLinks, null, 2));
+      console.log(pageText);
     }
 
     for (const [url, info] of allLinks) {
       try {
         console.log(`  Checking: ${info.name || url}`);
+        await page.waitForTimeout(randomDelay(1000, 3000));
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(randomDelay(2000, 4000));
+        await humanScroll(page);
 
         const detail = await page.evaluate(() => {
           const getText = (...selectors) => {
@@ -188,7 +216,6 @@ async function scrapeProducts() {
             '[class*="strikethrough"]', 'del', 's'
           );
 
-          // Look for stock/availability/quantity info
           const stockSelectors = [
             '[class*="stock"]', '[class*="Stock"]',
             '[class*="avail"]', '[class*="Avail"]',
@@ -212,14 +239,12 @@ async function scrapeProducts() {
             }
           }
 
-          // Check for "Add to Cart" button state (disabled usually means out of stock)
           const addToCart = document.querySelector(
             'button[class*="addToCart"], button[class*="add-to-cart"], ' +
             'button[data-testid*="add-to-cart"], button[class*="AddToCart"]'
           );
           const canAddToCart = addToCart ? !addToCart.disabled : null;
 
-          // Look for quantity selector
           const qtySelect = document.querySelector('select[class*="qty"], select[class*="quantity"], input[class*="qty"]');
           let maxQty = null;
           if (qtySelect && qtySelect.tagName === 'SELECT') {
@@ -229,7 +254,6 @@ async function scrapeProducts() {
             }
           }
 
-          // Check for "Only X left" type messages
           const bodyText = document.body.innerText;
           const qtyMatch = bodyText.match(/only\s+(\d+)\s+(left|available|remaining|in stock)/i) ||
                           bodyText.match(/(\d+)\s+(left|remaining|in stock|available)/i) ||
@@ -271,7 +295,30 @@ async function scrapeProducts() {
   }
 }
 
-function formatEmailHtml(products, timestamp) {
+function formatEmailHtml(products, timestamp, wasBlocked) {
+  if (wasBlocked) {
+    return `
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
+        <h2 style="color:#c0392b;border-bottom:2px solid #e74c3c;padding-bottom:8px">
+          Room & Board Monitor — Blocked
+        </h2>
+        <p>Bot detection prevented scraping at ${timestamp}.</p>
+        <p><a href="${TARGET_URL}" style="color:#3498db">Check manually</a></p>
+      </div>`;
+  }
+
+  if (products.length === 0) {
+    return `
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
+        <h2 style="color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:8px">
+          Room & Board Clearance Sofas
+        </h2>
+        <p style="color:#7f8c8d;font-size:14px">Checked at ${timestamp}</p>
+        <p>No clearance sofas found at this time.</p>
+        <p><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a></p>
+      </div>`;
+  }
+
   const rows = products.map(p => {
     let stockDisplay = '';
     if (p.error) {
@@ -330,14 +377,17 @@ function formatEmailHtml(products, timestamp) {
     </div>`;
 }
 
-async function sendEmail(products) {
+async function sendEmail(products, wasBlocked) {
   const timestamp = new Date().toLocaleString('en-US', { timeZone: process.env.TZ || 'America/Chicago' });
+  const subject = wasBlocked
+    ? `Clearance Sofas: BLOCKED — ${timestamp}`
+    : `Clearance Sofas: ${products.length} items found — ${timestamp}`;
 
   const info = await transporter.sendMail({
     from: process.env.SMTP_USER,
     to: process.env.NOTIFY_EMAIL || process.env.SMTP_USER,
-    subject: `Clearance Sofas: ${products.length} items found — ${timestamp}`,
-    html: formatEmailHtml(products, timestamp),
+    subject,
+    html: formatEmailHtml(products, timestamp, wasBlocked),
   });
 
   console.log(`  Email sent: ${info.messageId}`);
@@ -357,12 +407,19 @@ async function run() {
     });
 
     if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      await sendEmail(products);
+      await sendEmail(products, false);
     } else {
       console.log('  [SKIP] Email not configured (set SMTP_USER and SMTP_PASS in .env)');
     }
   } catch (err) {
     console.error(`  Error: ${err.message}`);
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      try {
+        await sendEmail([], true);
+      } catch (emailErr) {
+        console.error(`  Email error: ${emailErr.message}`);
+      }
+    }
   }
 }
 

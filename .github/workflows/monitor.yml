@@ -10,13 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
       - run: npm install
+
       - run: npx playwright install chromium --with-deps
-      - run: node monitor.js --once
+
+      - name: Check clearance sofas
+        run: xvfb-run --auto-servernum node monitor.js --once
         env:
+          DISPLAY: ':99'
+          HEADED: 'true'
           SMTP_HOST: smtp.gmail.com
           SMTP_PORT: '465'
           SMTP_SECURE: 'true'
