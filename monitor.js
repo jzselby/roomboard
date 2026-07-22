@@ -6,6 +6,7 @@ const nodemailer = require('nodemailer');
 chromium.use(StealthPlugin());
 
 const TARGET_URL = 'https://www.roomandboard.com/clearance/living/sofas-and-loveseats';
+const HOMEPAGE_URL = 'https://www.roomandboard.com';
 const INTERVAL_MS = 10 * 60 * 1000;
 
 const CHROMIUM_PATH = process.env.CHROMIUM_PATH || undefined;
@@ -21,19 +22,21 @@ const transporter = nodemailer.createTransport({
 });
 
 function randomDelay(min, max) {
-  return Math.floor(Math.random() * (max - min) + min);
+  return new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
 }
 
 async function humanScroll(page) {
-  const scrolls = randomDelay(2, 5);
+  const scrolls = 2 + Math.floor(Math.random() * 3);
   for (let i = 0; i < scrolls; i++) {
-    await page.mouse.wheel(0, randomDelay(200, 500));
-    await page.waitForTimeout(randomDelay(300, 800));
+    await page.evaluate(() => window.scrollBy(0, 200 + Math.random() * 400));
+    await randomDelay(300, 800);
   }
 }
 
 async function scrapeProducts() {
-  const useHeaded = process.env.DISPLAY || process.env.HEADED === 'true';
+  const useHeaded = !!(process.env.DISPLAY || process.env.HEADED === 'true');
+  console.log(`  Browser mode: ${useHeaded ? 'headed (xvfb)' : 'headless'}`);
+
   const browser = await chromium.launch({
     executablePath: CHROMIUM_PATH,
     headless: !useHeaded,
@@ -42,6 +45,7 @@ async function scrapeProducts() {
       '--disable-setuid-sandbox',
       '--disable-blink-features=AutomationControlled',
       '--disable-dev-shm-usage',
+      '--disable-infobars',
       '--window-size=1440,900',
     ],
   });
@@ -52,7 +56,6 @@ async function scrapeProducts() {
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
       timezoneId: 'America/Chicago',
-      javaScriptEnabled: true,
       extraHTTPHeaders: {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
@@ -64,44 +67,60 @@ async function scrapeProducts() {
         'Upgrade-Insecure-Requests': '1',
       },
     });
+
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      window.chrome = { runtime: {} };
+    });
+
     const page = await context.newPage();
 
-    // First visit the homepage to get cookies, like a real user
+    // Visit homepage first to establish cookies/session
     console.log('  Visiting homepage first...');
-    await page.goto('https://www.roomandboard.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(randomDelay(2000, 4000));
+    await page.goto(HOMEPAGE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await randomDelay(2000, 4000);
     await humanScroll(page);
-    await page.waitForTimeout(randomDelay(1000, 2000));
+    await randomDelay(1000, 2000);
 
-    // Now navigate to the clearance page
+    // Navigate to clearance page via link path (more natural than direct URL)
     console.log('  Navigating to clearance sofas...');
-    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
-    await page.waitForTimeout(randomDelay(2000, 4000));
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await randomDelay(3000, 5000);
 
     // Check for bot detection
-    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
-    const blocked = bodyText.includes('Just Checking') || bodyText.includes("confirm you're human");
+    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
+    const blocked = bodyText.includes('Just Checking') ||
+                    bodyText.includes('confirm you\'re human') ||
+                    bodyText.includes('Press & Hold') ||
+                    bodyText.includes('Before we continue');
 
     if (blocked) {
       console.log('  Bot detection triggered, waiting and retrying...');
-      await page.waitForTimeout(10000);
-      await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
-      await page.waitForTimeout(5000);
-      const retryText = await page.evaluate(() => document.body.innerText.substring(0, 500));
-      if (retryText.includes('Just Checking') || retryText.includes("confirm you're human")) {
-        console.log('  WARNING: Still blocked by bot detection');
-        return [];
+      await randomDelay(8000, 15000);
+
+      // Try reloading
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await randomDelay(5000, 8000);
+
+      const retryText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
+      if (retryText.includes('Press & Hold') || retryText.includes('Just Checking') || retryText.includes('Before we continue')) {
+        console.log('  Still blocked after retry — sending alert email');
+        const screenshot = await page.screenshot({ fullPage: true }).catch(() => null);
+        await browser.close();
+        return { blocked: true, bodyPreview: retryText.substring(0, 500), screenshot };
       }
     }
 
     await humanScroll(page);
-    await page.waitForTimeout(randomDelay(1000, 2000));
+    await randomDelay(1000, 2000);
 
-    // Wait for product grid to render
+    // Wait for product grid
     await page.waitForSelector('a[href*="/clearance/"]', { timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    await randomDelay(1000, 2000);
 
-    // Gather all product links from the listing page
+    // Gather product links
     const productLinks = await page.evaluate(() => {
       const seen = new Set();
       const links = [];
@@ -119,20 +138,15 @@ async function scrapeProducts() {
       return links;
     });
 
-    // Also try to grab product cards from the listing grid
+    // Try to grab product cards from the listing grid
     const gridProducts = await page.evaluate(() => {
       const products = [];
       const selectors = [
         '[data-testid*="product"]',
-        '[class*="ProductCard"]',
-        '[class*="product-card"]',
-        '[class*="productCard"]',
-        '[class*="product-tile"]',
-        '[class*="ProductTile"]',
-        '.grid-item',
-        '[class*="clearance"] [class*="card"]',
-        'article',
-        'li[class*="product"]',
+        '[class*="ProductCard"]', '[class*="product-card"]',
+        '[class*="productCard"]', '[class*="product-tile"]',
+        '[class*="ProductTile"]', '.grid-item',
+        'article', 'li[class*="product"]',
       ];
 
       for (const sel of selectors) {
@@ -141,18 +155,13 @@ async function scrapeProducts() {
           els.forEach(el => {
             const name = (
               el.querySelector('h2, h3, h4, [class*="name"], [class*="Name"], [class*="title"], [class*="Title"]')?.textContent ||
-              el.querySelector('a')?.textContent ||
-              ''
+              el.querySelector('a')?.textContent || ''
             ).trim().replace(/\s+/g, ' ');
-
             const link = el.querySelector('a')?.href || '';
-
             const priceEl = el.querySelector('[class*="price"], [class*="Price"], [class*="sale"], [class*="Sale"]');
             const price = priceEl ? priceEl.textContent.trim().replace(/\s+/g, ' ') : '';
-
-            const stockEl = el.querySelector('[class*="stock"], [class*="Stock"], [class*="avail"], [class*="Avail"], [class*="quantity"], [class*="Quantity"], [class*="badge"], [class*="Badge"]');
+            const stockEl = el.querySelector('[class*="stock"], [class*="Stock"], [class*="avail"], [class*="Avail"], [class*="badge"], [class*="Badge"]');
             const stock = stockEl ? stockEl.textContent.trim() : '';
-
             if (name && name.length > 3) {
               products.push({ name, link, price, stock, selector: sel });
             }
@@ -163,8 +172,7 @@ async function scrapeProducts() {
       return products;
     });
 
-    const detailedProducts = [];
-
+    // Deduplicate links
     const allLinks = new Map();
     for (const p of gridProducts) {
       if (p.link) allLinks.set(p.link, { name: p.name, price: p.price, stock: p.stock });
@@ -176,19 +184,19 @@ async function scrapeProducts() {
     }
 
     if (allLinks.size === 0) {
-      const pageText = await page.evaluate(() =>
-        document.body.innerText.substring(0, 3000)
-      );
+      const debugText = await page.evaluate(() => document.body.innerText.substring(0, 3000));
       console.log('[DEBUG] No product links found. Page text preview:');
-      console.log(pageText);
+      console.log(debugText);
     }
 
+    // Visit each product page for detailed stock info
+    const detailedProducts = [];
     for (const [url, info] of allLinks) {
       try {
         console.log(`  Checking: ${info.name || url}`);
-        await page.waitForTimeout(randomDelay(1000, 3000));
+        await randomDelay(1500, 3000);
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForTimeout(randomDelay(2000, 4000));
+        await randomDelay(2000, 3500);
         await humanScroll(page);
 
         const detail = await page.evaluate(() => {
@@ -200,32 +208,15 @@ async function scrapeProducts() {
             return '';
           };
 
-          const name = getText(
-            'h1', '[class*="productName"]', '[class*="product-name"]',
-            '[class*="ProductName"]', '[data-testid="product-name"]'
-          );
-
-          const price = getText(
-            '[class*="salePrice"]', '[class*="sale-price"]', '[class*="SalePrice"]',
-            '[class*="clearance-price"]', '[class*="price"]', '[class*="Price"]'
-          );
-
-          const originalPrice = getText(
-            '[class*="originalPrice"]', '[class*="original-price"]',
-            '[class*="comparePrice"]', '[class*="wasPrice"]',
-            '[class*="strikethrough"]', 'del', 's'
-          );
+          const name = getText('h1', '[class*="productName"]', '[class*="product-name"]', '[class*="ProductName"]');
+          const price = getText('[class*="salePrice"]', '[class*="sale-price"]', '[class*="SalePrice"]', '[class*="price"]', '[class*="Price"]');
+          const originalPrice = getText('[class*="originalPrice"]', '[class*="original-price"]', '[class*="comparePrice"]', 'del', 's');
 
           const stockSelectors = [
-            '[class*="stock"]', '[class*="Stock"]',
-            '[class*="avail"]', '[class*="Avail"]',
-            '[class*="inventory"]', '[class*="Inventory"]',
-            '[class*="quantity"]', '[class*="Quantity"]',
-            '[class*="in-stock"]', '[class*="inStock"]',
-            '[class*="out-of-stock"]', '[class*="outOfStock"]',
-            '[class*="badge"]', '[class*="Badge"]',
+            '[class*="stock"]', '[class*="Stock"]', '[class*="avail"]', '[class*="Avail"]',
+            '[class*="inventory"]', '[class*="quantity"]', '[class*="in-stock"]', '[class*="inStock"]',
+            '[class*="out-of-stock"]', '[class*="outOfStock"]', '[class*="badge"]', '[class*="Badge"]',
             '[class*="remaining"]', '[class*="left"]',
-            '[data-testid*="stock"]', '[data-testid*="avail"]',
           ];
 
           let stockInfo = '';
@@ -239,19 +230,14 @@ async function scrapeProducts() {
             }
           }
 
-          const addToCart = document.querySelector(
-            'button[class*="addToCart"], button[class*="add-to-cart"], ' +
-            'button[data-testid*="add-to-cart"], button[class*="AddToCart"]'
-          );
+          const addToCart = document.querySelector('button[class*="addToCart"], button[class*="add-to-cart"], button[class*="AddToCart"]');
           const canAddToCart = addToCart ? !addToCart.disabled : null;
 
           const qtySelect = document.querySelector('select[class*="qty"], select[class*="quantity"], input[class*="qty"]');
           let maxQty = null;
           if (qtySelect && qtySelect.tagName === 'SELECT') {
             const opts = qtySelect.querySelectorAll('option');
-            if (opts.length > 0) {
-              maxQty = parseInt(opts[opts.length - 1].value) || opts.length;
-            }
+            if (opts.length > 0) maxQty = parseInt(opts[opts.length - 1].value) || opts.length;
           }
 
           const bodyText = document.body.innerText;
@@ -260,16 +246,7 @@ async function scrapeProducts() {
                           bodyText.match(/quantity[:\s]+(\d+)/i);
           const qtyFromText = qtyMatch ? parseInt(qtyMatch[1]) : null;
 
-          return {
-            name,
-            price,
-            originalPrice,
-            stockInfo,
-            canAddToCart,
-            maxQty,
-            qtyFromText,
-            url: window.location.href,
-          };
+          return { name, price, originalPrice, stockInfo, canAddToCart, maxQty, qtyFromText, url: window.location.href };
         });
 
         detailedProducts.push({
@@ -280,12 +257,7 @@ async function scrapeProducts() {
         });
       } catch (err) {
         console.log(`  Error checking ${url}: ${err.message}`);
-        detailedProducts.push({
-          name: info.name,
-          url,
-          price: info.price,
-          error: err.message,
-        });
+        detailedProducts.push({ name: info.name, url, price: info.price, error: err.message });
       }
     }
 
@@ -295,29 +267,8 @@ async function scrapeProducts() {
   }
 }
 
-function formatEmailHtml(products, timestamp, wasBlocked) {
-  if (wasBlocked) {
-    return `
-      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
-        <h2 style="color:#c0392b;border-bottom:2px solid #e74c3c;padding-bottom:8px">
-          Room & Board Monitor — Blocked
-        </h2>
-        <p>Bot detection prevented scraping at ${timestamp}.</p>
-        <p><a href="${TARGET_URL}" style="color:#3498db">Check manually</a></p>
-      </div>`;
-  }
-
-  if (products.length === 0) {
-    return `
-      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
-        <h2 style="color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:8px">
-          Room & Board Clearance Sofas
-        </h2>
-        <p style="color:#7f8c8d;font-size:14px">Checked at ${timestamp}</p>
-        <p>No clearance sofas found at this time.</p>
-        <p><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a></p>
-      </div>`;
-  }
+function formatEmailHtml(products, timestamp) {
+  if (!Array.isArray(products)) return '';
 
   const rows = products.map(p => {
     let stockDisplay = '';
@@ -377,17 +328,50 @@ function formatEmailHtml(products, timestamp, wasBlocked) {
     </div>`;
 }
 
-async function sendEmail(products, wasBlocked) {
+function formatBlockedEmailHtml(bodyPreview, timestamp) {
+  return `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
+      <h2 style="color:#c0392b;border-bottom:2px solid #e74c3c;padding-bottom:8px">
+        ⚠ Room & Board — Bot Detection Triggered
+      </h2>
+      <p style="color:#7f8c8d;font-size:14px">
+        Checked at ${timestamp}
+      </p>
+      <p>The scraper was blocked by bot detection (PerimeterX "Press & Hold" challenge). No product data was collected this run.</p>
+      <details>
+        <summary>Page text preview</summary>
+        <pre style="background:#f8f9fa;padding:12px;border-radius:4px;font-size:12px;white-space:pre-wrap">${bodyPreview}</pre>
+      </details>
+      <p style="color:#95a5a6;font-size:12px;margin-top:20px">
+        <a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a>
+        &bull; Will retry on next scheduled run
+      </p>
+    </div>`;
+}
+
+async function sendEmail(result) {
   const timestamp = new Date().toLocaleString('en-US', { timeZone: process.env.TZ || 'America/Chicago' });
-  const subject = wasBlocked
-    ? `Clearance Sofas: BLOCKED — ${timestamp}`
-    : `Clearance Sofas: ${products.length} items found — ${timestamp}`;
+
+  let subject, html, attachments = [];
+
+  if (result && result.blocked) {
+    subject = `⚠ Clearance Sofas: Blocked by bot detection — ${timestamp}`;
+    html = formatBlockedEmailHtml(result.bodyPreview || '', timestamp);
+    if (result.screenshot) {
+      attachments.push({ filename: 'blocked-page.png', content: result.screenshot });
+    }
+  } else {
+    const products = Array.isArray(result) ? result : [];
+    subject = `Clearance Sofas: ${products.length} items found — ${timestamp}`;
+    html = formatEmailHtml(products, timestamp);
+  }
 
   const info = await transporter.sendMail({
     from: process.env.SMTP_USER,
     to: process.env.NOTIFY_EMAIL || process.env.SMTP_USER,
     subject,
-    html: formatEmailHtml(products, timestamp, wasBlocked),
+    html,
+    attachments,
   });
 
   console.log(`  Email sent: ${info.messageId}`);
@@ -398,28 +382,25 @@ async function run() {
   console.log(`\n[${timestamp}] Checking Room & Board clearance sofas...`);
 
   try {
-    const products = await scrapeProducts();
-    console.log(`  Found ${products.length} product(s)`);
+    const result = await scrapeProducts();
 
-    products.forEach(p => {
-      const stock = [p.stockInfo, p.canAddToCart !== null ? (p.canAddToCart ? 'Purchasable' : 'Not purchasable') : '', p.qtyFromText ? `${p.qtyFromText} avail` : ''].filter(Boolean).join(' | ');
-      console.log(`    - ${p.name || 'Unknown'}: ${p.price || 'N/A'} [${stock || 'no stock info'}]`);
-    });
+    if (result && result.blocked) {
+      console.log('  Blocked by bot detection');
+    } else if (Array.isArray(result)) {
+      console.log(`  Found ${result.length} product(s)`);
+      result.forEach(p => {
+        const stock = [p.stockInfo, p.canAddToCart !== null ? (p.canAddToCart ? 'Purchasable' : 'Not purchasable') : '', p.qtyFromText ? `${p.qtyFromText} avail` : ''].filter(Boolean).join(' | ');
+        console.log(`    - ${p.name || 'Unknown'}: ${p.price || 'N/A'} [${stock || 'no stock info'}]`);
+      });
+    }
 
     if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      await sendEmail(products, false);
+      await sendEmail(result);
     } else {
       console.log('  [SKIP] Email not configured (set SMTP_USER and SMTP_PASS in .env)');
     }
   } catch (err) {
     console.error(`  Error: ${err.message}`);
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      try {
-        await sendEmail([], true);
-      } catch (emailErr) {
-        console.error(`  Email error: ${emailErr.message}`);
-      }
-    }
   }
 }
 
