@@ -33,6 +33,131 @@ async function humanScroll(page) {
   }
 }
 
+async function humanMouseMove(page, x, y) {
+  const steps = 8 + Math.floor(Math.random() * 8);
+  const current = { x: 100 + Math.random() * 200, y: 100 + Math.random() * 200 };
+  for (let i = 1; i <= steps; i++) {
+    const progress = i / steps;
+    const jitterX = (Math.random() - 0.5) * 6;
+    const jitterY = (Math.random() - 0.5) * 6;
+    const moveX = current.x + (x - current.x) * progress + jitterX;
+    const moveY = current.y + (y - current.y) * progress + jitterY;
+    await page.mouse.move(moveX, moveY);
+    await randomDelay(10, 40);
+  }
+  await page.mouse.move(x, y);
+}
+
+async function solveChallenge(page) {
+  console.log('  Attempting to solve Press & Hold challenge...');
+  await randomDelay(1000, 2000);
+
+  // Look for the Press & Hold button — could be in main page or iframe
+  let challengeFrame = page;
+
+  // Check iframes first (PerimeterX often uses iframes)
+  const frames = page.frames();
+  for (const frame of frames) {
+    try {
+      const hasChallenge = await frame.evaluate(() =>
+        document.body?.innerText?.includes('Press & Hold')
+      ).catch(() => false);
+      if (hasChallenge) {
+        challengeFrame = frame;
+        console.log('  Found challenge in iframe');
+        break;
+      }
+    } catch {}
+  }
+
+  // Find the press-and-hold button
+  const buttonSelectors = [
+    '#px-captcha',
+    '[id*="px-captcha"]',
+    '[class*="px-captcha"]',
+    'button:has-text("Press & Hold")',
+    'div:has-text("Press & Hold")',
+    '[role="button"]',
+    '#challenge',
+    '[id*="challenge"]',
+  ];
+
+  let button = null;
+  for (const sel of buttonSelectors) {
+    try {
+      const el = challengeFrame.locator(sel).first();
+      if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
+        button = el;
+        console.log(`  Found challenge element: ${sel}`);
+        break;
+      }
+    } catch {}
+  }
+
+  if (!button) {
+    console.log('  Could not find Press & Hold button element');
+    return false;
+  }
+
+  // Get button position
+  const box = await button.boundingBox();
+  if (!box) {
+    console.log('  Could not get button position');
+    return false;
+  }
+
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+
+  // Simulate human-like mouse movement to button
+  await humanMouseMove(page, centerX, centerY);
+  await randomDelay(200, 500);
+
+  // Press and hold
+  console.log('  Pressing and holding...');
+  await page.mouse.down();
+
+  // Hold for several seconds with micro-movements (human hands aren't perfectly still)
+  const holdDuration = 5000 + Math.random() * 3000;
+  const microMoveCount = 10 + Math.floor(Math.random() * 10);
+  const microInterval = holdDuration / microMoveCount;
+
+  for (let i = 0; i < microMoveCount; i++) {
+    const jx = centerX + (Math.random() - 0.5) * 4;
+    const jy = centerY + (Math.random() - 0.5) * 4;
+    await page.mouse.move(jx, jy);
+    await randomDelay(microInterval * 0.8, microInterval * 1.2);
+  }
+
+  // Release
+  await page.mouse.up();
+  console.log(`  Released after ${Math.round(holdDuration)}ms hold`);
+
+  // Wait for potential redirect/page change
+  await randomDelay(3000, 5000);
+
+  // Check if challenge is gone
+  const afterText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
+  const stillBlocked = afterText.includes('Press & Hold') ||
+                       afterText.includes('Just Checking') ||
+                       afterText.includes('Before we continue');
+
+  if (!stillBlocked) {
+    console.log('  Challenge appears solved!');
+    return true;
+  }
+
+  console.log('  Challenge still present after attempt');
+  return false;
+}
+
+function isBlocked(text) {
+  return text.includes('Just Checking') ||
+         text.includes("confirm you're human") ||
+         text.includes('Press & Hold') ||
+         text.includes('Before we continue');
+}
+
 async function scrapeProducts() {
   const useHeaded = !!(process.env.DISPLAY || process.env.HEADED === 'true');
   console.log(`  Browser mode: ${useHeaded ? 'headed (xvfb)' : 'headless'}`);
@@ -84,35 +209,55 @@ async function scrapeProducts() {
     await humanScroll(page);
     await randomDelay(1000, 2000);
 
-    // Navigate to clearance page via link path (more natural than direct URL)
+    // Navigate to clearance sofas
     console.log('  Navigating to clearance sofas...');
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await randomDelay(3000, 5000);
 
-    // Check for bot detection
-    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
-    const blocked = bodyText.includes('Just Checking') ||
-                    bodyText.includes('confirm you\'re human') ||
-                    bodyText.includes('Press & Hold') ||
-                    bodyText.includes('Before we continue');
+    // Check for bot detection and try to solve it
+    let bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
+    if (isBlocked(bodyText)) {
+      console.log('  Bot detection triggered');
 
-    if (blocked) {
-      console.log('  Bot detection triggered, waiting and retrying...');
-      await randomDelay(8000, 15000);
+      // Attempt 1: solve the challenge
+      const solved = await solveChallenge(page);
+      if (solved) {
+        // Navigate back to the target URL if we were redirected
+        const currentUrl = page.url();
+        if (!currentUrl.includes('clearance')) {
+          await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+          await randomDelay(3000, 5000);
+        }
+        bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
+      }
 
-      // Try reloading
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-      await randomDelay(5000, 8000);
+      // Attempt 2: if still blocked, wait longer and try again
+      if (isBlocked(bodyText)) {
+        console.log('  Retrying challenge after delay...');
+        await randomDelay(5000, 10000);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+        await randomDelay(3000, 5000);
+        bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
 
-      const retryText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
-      if (retryText.includes('Press & Hold') || retryText.includes('Just Checking') || retryText.includes('Before we continue')) {
-        console.log('  Still blocked after retry — sending alert email');
+        if (isBlocked(bodyText)) {
+          const solved2 = await solveChallenge(page);
+          if (solved2) {
+            await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await randomDelay(3000, 5000);
+            bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
+          }
+        }
+      }
+
+      if (isBlocked(bodyText)) {
+        console.log('  Still blocked after all attempts — sending alert email');
         const screenshot = await page.screenshot({ fullPage: true }).catch(() => null);
         await browser.close();
-        return { blocked: true, bodyPreview: retryText.substring(0, 500), screenshot };
+        return { blocked: true, bodyPreview: bodyText.substring(0, 500), screenshot };
       }
     }
 
+    console.log('  Page loaded successfully');
     await humanScroll(page);
     await randomDelay(1000, 2000);
 
