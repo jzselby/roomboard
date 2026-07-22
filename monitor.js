@@ -110,16 +110,24 @@ function extractProductsFromNextData(nextData) {
 
   console.log('    pageProps keys:', Object.keys(pageProps).join(', '));
 
-  // Log the structure to understand the data
-  for (const [key, val] of Object.entries(pageProps)) {
-    if (Array.isArray(val)) {
-      console.log(`    pageProps.${key}: array[${val.length}]`);
-      if (val.length > 0 && typeof val[0] === 'object') {
-        console.log(`      first item keys: ${Object.keys(val[0]).join(', ')}`);
+  // Deep-inspect clearanceData which is where products live
+  const cd = pageProps.clearanceData;
+  if (cd) {
+    console.log('    clearanceData keys:', Object.keys(cd).join(', '));
+    logStructure(cd, '      ', 4);
+
+    // Try document.items, document.products, or any array inside clearanceData
+    const doc = cd.document || cd;
+    if (doc && typeof doc === 'object') {
+      for (const [key, val] of Object.entries(doc)) {
+        if (Array.isArray(val) && val.length > 0) {
+          console.log(`    clearanceData.document.${key}: array[${val.length}]`);
+          if (typeof val[0] === 'object' && val[0] !== null) {
+            console.log(`      [0] keys: ${Object.keys(val[0]).join(', ')}`);
+            console.log(`      [0] sample: ${JSON.stringify(val[0]).substring(0, 500)}`);
+          }
+        }
       }
-    } else if (typeof val === 'object' && val !== null) {
-      const keys = Object.keys(val);
-      console.log(`    pageProps.${key}: {${keys.slice(0, 8).join(', ')}${keys.length > 8 ? '...' : ''}}`);
     }
   }
 
@@ -275,56 +283,90 @@ function parseHtmlProducts(html) {
   const $ = cheerio.load(html);
   const products = [];
 
-  // Try many link patterns
-  const linkSelectors = [
-    'a[href*="/clearance/"]',
-    'a[href*="/product/"]',
-    'a[href*="/sofas"]',
-    'a[href*="sofa"]',
-    'a[href*="loveseat"]',
-  ];
-
-  for (const sel of linkSelectors) {
-    $(sel).each((_, el) => {
-      const href = $(el).attr('href');
-      if (!href) return;
-      const fullUrl = href.startsWith('http') ? href : `https://www.roomandboard.com${href}`;
-      const text = $(el).text().trim().replace(/\s+/g, ' ');
-      if (text.length > 3 && !products.some(p => p.url === fullUrl)) {
-        products.push({ name: text.substring(0, 200), url: fullUrl, source: 'html-links' });
-      }
-    });
-  }
-
-  // Try product cards
+  // Strategy A: Parse clearance-item cards (known to match 10 elements)
   const cardSelectors = [
+    '[class*="clearance-item"]', '[class*="ClearanceItem"]',
     '[data-testid*="product"]', '[data-testid*="Product"]',
-    '[class*="ProductCard"]', '[class*="product-card"]', '[class*="productCard"]',
-    '[class*="ProductTile"]', '[class*="product-tile"]', '[class*="productTile"]',
-    '[class*="ProductGrid"] > *', '[class*="product-grid"] > *',
-    '[class*="ClearanceItem"]', '[class*="clearance-item"]',
-    'article', '.grid-item', 'li[class*="product"]',
+    '[class*="ProductCard"]', '[class*="product-card"]',
+    '[class*="ProductTile"]', '[class*="product-tile"]',
   ];
 
   for (const sel of cardSelectors) {
     const cards = $(sel);
     if (cards.length > 0) {
       console.log(`    Found ${cards.length} elements matching: ${sel}`);
+
+      // Log the first card's full HTML structure for debugging
+      if (cards.length > 0) {
+        const firstCard = $(cards[0]);
+        console.log(`    First card inner HTML (500 chars): ${firstCard.html()?.substring(0, 500)}`);
+        console.log(`    First card classes: ${firstCard.attr('class')}`);
+      }
+
       cards.each((_, el) => {
-        const name = $(el).find('h2, h3, h4, [class*="name"], [class*="Name"], [class*="title"], [class*="Title"]').first().text().trim().replace(/\s+/g, ' ');
-        const link = $(el).find('a').first().attr('href') || '';
-        const price = $(el).find('[class*="price"], [class*="Price"], [class*="sale"], [class*="Sale"]').first().text().trim().replace(/\s+/g, ' ');
+        const card = $(el);
+        // Extract name from various selectors
+        const name = (
+          card.find('h2, h3, h4').first().text().trim() ||
+          card.find('[class*="name"], [class*="Name"], [class*="title"], [class*="Title"]').first().text().trim() ||
+          card.find('a').first().text().trim()
+        ).replace(/\s+/g, ' ');
+
+        const link = card.find('a').first().attr('href') || '';
         const fullUrl = link.startsWith('http') ? link : link ? `https://www.roomandboard.com${link}` : '';
-        if (name && name.length > 3 && !products.some(p => p.name === name && p.url === fullUrl)) {
-          products.push({ name: name.substring(0, 200), url: fullUrl, price, source: 'html-cards' });
+
+        // Extract all price-related text
+        const allText = card.text().replace(/\s+/g, ' ').trim();
+        const priceMatches = allText.match(/\$[\d,]+(?:\.\d{2})?/g) || [];
+        let price = '', originalPrice = '';
+        if (priceMatches.length >= 2) {
+          originalPrice = priceMatches[0];
+          price = priceMatches[1];
+        } else if (priceMatches.length === 1) {
+          price = priceMatches[0];
+        }
+
+        // Extract stock/quantity info
+        let stockInfo = '';
+        const qtyMatch = allText.match(/(\d+)\s*(left|available|remaining|in stock)/i);
+        if (qtyMatch) stockInfo = `${qtyMatch[1]} ${qtyMatch[2]}`;
+        const onlyMatch = allText.match(/only\s+(\d+)/i);
+        if (onlyMatch && !stockInfo) stockInfo = `Only ${onlyMatch[1]} left`;
+
+        if (name && name.length > 5 && fullUrl.includes('/clearance/')) {
+          products.push({
+            name: name.substring(0, 200), url: fullUrl,
+            price, originalPrice, stockInfo,
+            source: 'html-cards',
+          });
         }
       });
       if (products.length > 0) break;
     }
   }
 
+  // Strategy B: If no cards found, try product links (filter out nav)
   if (products.length === 0) {
-    // Log what we do see for debugging
+    $('a[href*="/clearance/"]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      // Only include links that look like individual products (deep paths)
+      // e.g. /clearance/living/sofas-and-loveseats/clemens-66-armless-loveseat-...
+      if (href.split('/').filter(Boolean).length < 5) return;
+      const fullUrl = href.startsWith('http') ? href : `https://www.roomandboard.com${href}`;
+      const text = $(el).text().trim().replace(/\s+/g, ' ');
+      if (text.length > 5 && !products.some(p => p.url === fullUrl)) {
+        // Try to get price from parent or sibling elements
+        const parent = $(el).parent();
+        const parentText = parent.text().replace(/\s+/g, ' ');
+        const priceMatches = parentText.match(/\$[\d,]+(?:\.\d{2})?/g) || [];
+        let price = priceMatches.length > 0 ? priceMatches[priceMatches.length - 1] : '';
+
+        products.push({ name: text.substring(0, 200), url: fullUrl, price, source: 'html-links' });
+      }
+    });
+  }
+
+  if (products.length === 0) {
     const allClasses = new Set();
     $('[class]').each((_, el) => {
       const cls = $(el).attr('class');
@@ -335,14 +377,6 @@ function parseHtmlProducts(html) {
     ).sort();
     if (relevant.length > 0) {
       console.log(`    Relevant CSS classes found: ${relevant.slice(0, 30).join(', ')}`);
-    }
-
-    // Log data-testid attributes
-    const testIds = [];
-    $('[data-testid]').each((_, el) => testIds.push($(el).attr('data-testid')));
-    const relevantTestIds = testIds.filter(id => /product|item|card|tile|grid|sofa|clearance|price/i.test(id));
-    if (relevantTestIds.length > 0) {
-      console.log(`    Relevant data-testid: ${relevantTestIds.slice(0, 20).join(', ')}`);
     }
   }
 
