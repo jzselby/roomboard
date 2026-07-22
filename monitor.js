@@ -3,8 +3,8 @@ const nodemailer = require('nodemailer');
 const cheerio = require('cheerio');
 
 const TARGET_URL = 'https://www.roomandboard.com/clearance/living/sofas-and-loveseats';
-const HOMEPAGE_URL = 'https://www.roomandboard.com';
 const INTERVAL_MS = 10 * 60 * 1000;
+const MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -20,470 +20,388 @@ function randomDelay(min, max) {
   return new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
 }
 
-// ─── Strategy 1: Direct HTTP fetch (no browser, no PerimeterX JS) ───
+// ─── Strategy 1: Next.js data API (pure JSON, no PerimeterX) ───
 
-async function tryDirectFetch() {
-  console.log('  Strategy 1: Direct HTTP fetch...');
+async function tryNextDataApi() {
+  console.log('  Strategy 1: Next.js data API...');
 
-  const userAgents = [
-    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
-  ];
+  // First fetch the page to get the buildId from __NEXT_DATA__
+  try {
+    const resp = await fetch(TARGET_URL, {
+      headers: {
+        'User-Agent': MOBILE_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      redirect: 'follow',
+    });
+    const html = await resp.text();
 
-  for (const ua of userAgents) {
-    try {
-      const label = ua.includes('Googlebot') ? 'Googlebot' : ua.includes('iPhone') ? 'Mobile' : 'Desktop';
-      console.log(`    Trying ${label} UA...`);
-      const resp = await fetch(TARGET_URL, {
+    if (html.includes('Press & Hold') || html.includes('Just Checking') || html.includes('Before we continue')) {
+      console.log('    Mobile UA blocked, skipping data API');
+      return null;
+    }
+
+    // Extract buildId from __NEXT_DATA__
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (!nextDataMatch) {
+      console.log('    No __NEXT_DATA__ found');
+      return null;
+    }
+
+    const nextData = JSON.parse(nextDataMatch[1]);
+    const buildId = nextData.buildId;
+    console.log(`    buildId: ${buildId}`);
+
+    // Try fetching the JSON data endpoint directly
+    if (buildId) {
+      const dataUrl = `https://www.roomandboard.com/_next/data/${buildId}/clearance/living/sofas-and-loveseats.json`;
+      console.log(`    Fetching data API: ${dataUrl}`);
+      const dataResp = await fetch(dataUrl, {
         headers: {
-          'User-Agent': ua,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'User-Agent': MOBILE_UA,
+          'Accept': 'application/json',
           'Accept-Language': 'en-US,en;q=0.9',
-          'Accept-Encoding': 'gzip, deflate, br',
         },
-        redirect: 'follow',
       });
-
-      const html = await resp.text();
-
-      if (html.includes('Press & Hold') || html.includes('Just Checking') || html.includes('Before we continue')) {
-        console.log(`    ${label}: got PerimeterX challenge page`);
-        continue;
+      if (dataResp.ok) {
+        const json = await dataResp.json();
+        console.log(`    Data API returned ${JSON.stringify(json).length} bytes`);
+        const products = extractProductsFromJson(json);
+        if (products.length > 0) {
+          console.log(`    Extracted ${products.length} products from data API`);
+          return products;
+        }
+      } else {
+        console.log(`    Data API returned ${dataResp.status}`);
       }
+    }
 
-      if (html.includes('clearance') && html.length > 10000) {
-        console.log(`    ${label}: got real content (${html.length} bytes)`);
-        return parseHtmlProducts(html);
+    // Fall back to parsing __NEXT_DATA__ from the HTML
+    const products = extractProductsFromNextData(nextData);
+    if (products.length > 0) {
+      console.log(`    Extracted ${products.length} products from __NEXT_DATA__`);
+      return products;
+    }
+
+    console.log('    Could not extract products from __NEXT_DATA__, trying HTML parse...');
+    return parseHtmlProducts(html);
+  } catch (err) {
+    console.log(`    Error: ${err.message}`);
+    return null;
+  }
+}
+
+// Recursively search JSON for product-like data
+function extractProductsFromJson(obj) {
+  const products = [];
+  findProducts(obj, products, '');
+  return deduplicateProducts(products);
+}
+
+function extractProductsFromNextData(nextData) {
+  const products = [];
+  const pageProps = nextData?.props?.pageProps;
+  if (!pageProps) {
+    console.log('    No pageProps in __NEXT_DATA__');
+    logStructure(nextData, '    ', 2);
+    return products;
+  }
+
+  console.log('    pageProps keys:', Object.keys(pageProps).join(', '));
+
+  // Log the structure to understand the data
+  for (const [key, val] of Object.entries(pageProps)) {
+    if (Array.isArray(val)) {
+      console.log(`    pageProps.${key}: array[${val.length}]`);
+      if (val.length > 0 && typeof val[0] === 'object') {
+        console.log(`      first item keys: ${Object.keys(val[0]).join(', ')}`);
       }
-
-      console.log(`    ${label}: unclear response (${html.length} bytes, status ${resp.status})`);
-    } catch (err) {
-      console.log(`    Error: ${err.message}`);
+    } else if (typeof val === 'object' && val !== null) {
+      const keys = Object.keys(val);
+      console.log(`    pageProps.${key}: {${keys.slice(0, 8).join(', ')}${keys.length > 8 ? '...' : ''}}`);
     }
   }
 
-  return null;
+  findProducts(pageProps, products, 'pageProps');
+  return deduplicateProducts(products);
 }
+
+function findProducts(obj, products, path, depth = 0) {
+  if (depth > 8 || !obj || typeof obj !== 'object') return;
+
+  if (Array.isArray(obj)) {
+    // Check if this is an array of product-like objects
+    const productLike = obj.filter(item =>
+      item && typeof item === 'object' &&
+      (item.name || item.title || item.productName || item.displayName) &&
+      (item.price || item.salePrice || item.clearancePrice || item.prices || item.pricing)
+    );
+
+    if (productLike.length > 0) {
+      console.log(`    Found ${productLike.length} product-like items at ${path}`);
+      for (const item of productLike) {
+        const name = item.name || item.title || item.productName || item.displayName || '';
+        const price = extractPrice(item);
+        const originalPrice = extractOriginalPrice(item);
+        const url = extractUrl(item);
+        const stock = extractStock(item);
+        const sku = item.sku || item.id || item.productId || '';
+
+        if (name) {
+          products.push({ name, price, originalPrice, url, stockInfo: stock, sku, source: 'next-data' });
+        }
+      }
+      return;
+    }
+
+    // Check if it's an array of items with nested product data
+    for (let i = 0; i < Math.min(obj.length, 50); i++) {
+      findProducts(obj[i], products, `${path}[${i}]`, depth + 1);
+    }
+    return;
+  }
+
+  // Check if this individual object looks like a product
+  if (isProductLike(obj)) {
+    const name = obj.name || obj.title || obj.productName || obj.displayName || '';
+    const price = extractPrice(obj);
+    const originalPrice = extractOriginalPrice(obj);
+    const url = extractUrl(obj);
+    const stock = extractStock(obj);
+    const sku = obj.sku || obj.id || obj.productId || '';
+
+    if (name) {
+      products.push({ name, price, originalPrice, url, stockInfo: stock, sku, source: 'next-data' });
+    }
+  }
+
+  // Recurse into child properties
+  for (const [key, val] of Object.entries(obj)) {
+    if (typeof val === 'object' && val !== null) {
+      findProducts(val, products, `${path}.${key}`, depth + 1);
+    }
+  }
+}
+
+function isProductLike(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  const hasName = !!(obj.name || obj.title || obj.productName || obj.displayName);
+  const hasPrice = !!(obj.price || obj.salePrice || obj.clearancePrice || obj.prices || obj.pricing ||
+                      obj.regularPrice || obj.retailPrice);
+  return hasName && hasPrice;
+}
+
+function extractPrice(item) {
+  if (typeof item.price === 'string') return item.price;
+  if (typeof item.price === 'number') return `$${item.price}`;
+  if (item.salePrice) return typeof item.salePrice === 'number' ? `$${item.salePrice}` : String(item.salePrice);
+  if (item.clearancePrice) return typeof item.clearancePrice === 'number' ? `$${item.clearancePrice}` : String(item.clearancePrice);
+  if (item.prices?.sale) return typeof item.prices.sale === 'number' ? `$${item.prices.sale}` : String(item.prices.sale);
+  if (item.prices?.clearance) return typeof item.prices.clearance === 'number' ? `$${item.prices.clearance}` : String(item.prices.clearance);
+  if (item.pricing?.sale) return typeof item.pricing.sale === 'number' ? `$${item.pricing.sale}` : String(item.pricing.sale);
+  if (typeof item.price === 'object' && item.price?.amount) return `$${item.price.amount}`;
+  return '';
+}
+
+function extractOriginalPrice(item) {
+  if (item.originalPrice) return typeof item.originalPrice === 'number' ? `$${item.originalPrice}` : String(item.originalPrice);
+  if (item.regularPrice) return typeof item.regularPrice === 'number' ? `$${item.regularPrice}` : String(item.regularPrice);
+  if (item.retailPrice) return typeof item.retailPrice === 'number' ? `$${item.retailPrice}` : String(item.retailPrice);
+  if (item.prices?.regular) return typeof item.prices.regular === 'number' ? `$${item.prices.regular}` : String(item.prices.regular);
+  if (item.prices?.retail) return typeof item.prices.retail === 'number' ? `$${item.prices.retail}` : String(item.prices.retail);
+  if (item.pricing?.regular) return typeof item.pricing.regular === 'number' ? `$${item.pricing.regular}` : String(item.pricing.regular);
+  return '';
+}
+
+function extractUrl(item) {
+  if (item.url) return item.url.startsWith('http') ? item.url : `https://www.roomandboard.com${item.url}`;
+  if (item.href) return item.href.startsWith('http') ? item.href : `https://www.roomandboard.com${item.href}`;
+  if (item.link) return item.link.startsWith('http') ? item.link : `https://www.roomandboard.com${item.link}`;
+  if (item.slug) return `https://www.roomandboard.com${item.slug.startsWith('/') ? '' : '/'}${item.slug}`;
+  if (item.pdpUrl) return item.pdpUrl.startsWith('http') ? item.pdpUrl : `https://www.roomandboard.com${item.pdpUrl}`;
+  return '';
+}
+
+function extractStock(item) {
+  const parts = [];
+  if (item.stockLevel !== undefined) parts.push(`Stock: ${item.stockLevel}`);
+  if (item.stockStatus) parts.push(item.stockStatus);
+  if (item.availability) parts.push(item.availability);
+  if (item.inStock !== undefined) parts.push(item.inStock ? 'In Stock' : 'Out of Stock');
+  if (item.inventory !== undefined) {
+    if (typeof item.inventory === 'number') parts.push(`${item.inventory} available`);
+    else if (typeof item.inventory === 'object') {
+      if (item.inventory.quantity !== undefined) parts.push(`${item.inventory.quantity} available`);
+      if (item.inventory.status) parts.push(item.inventory.status);
+    }
+  }
+  if (item.quantityAvailable !== undefined) parts.push(`${item.quantityAvailable} available`);
+  if (item.qty !== undefined) parts.push(`${item.qty} available`);
+  return parts.join(' | ');
+}
+
+function deduplicateProducts(products) {
+  const seen = new Set();
+  return products.filter(p => {
+    const key = p.name + (p.sku || '') + (p.url || '');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function logStructure(obj, indent = '', maxDepth = 3, depth = 0) {
+  if (depth >= maxDepth || !obj || typeof obj !== 'object') return;
+  const entries = Object.entries(obj);
+  for (const [k, v] of entries.slice(0, 15)) {
+    if (Array.isArray(v)) {
+      console.log(`${indent}${k}: array[${v.length}]`);
+      if (v.length > 0 && typeof v[0] === 'object' && v[0] !== null) {
+        console.log(`${indent}  [0] keys: ${Object.keys(v[0]).slice(0, 12).join(', ')}`);
+      }
+    } else if (typeof v === 'object' && v !== null) {
+      console.log(`${indent}${k}: {${Object.keys(v).slice(0, 8).join(', ')}}`);
+      logStructure(v, indent + '  ', maxDepth, depth + 1);
+    } else {
+      console.log(`${indent}${k}: ${typeof v} = ${String(v).substring(0, 80)}`);
+    }
+  }
+}
+
+// ─── Strategy 2: Direct HTML parse with broader selectors ───
 
 function parseHtmlProducts(html) {
   const $ = cheerio.load(html);
   const products = [];
 
-  $('a[href*="/clearance/"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (!href || href.split('/').length <= 5) return;
-    const fullUrl = href.startsWith('http') ? href : `https://www.roomandboard.com${href}`;
-    const text = $(el).text().trim().replace(/\s+/g, ' ');
-    if (text.length > 3 && !products.some(p => p.url === fullUrl)) {
-      products.push({ name: text.substring(0, 200), url: fullUrl, source: 'html-fetch' });
-    }
-  });
+  // Try many link patterns
+  const linkSelectors = [
+    'a[href*="/clearance/"]',
+    'a[href*="/product/"]',
+    'a[href*="/sofas"]',
+    'a[href*="sofa"]',
+    'a[href*="loveseat"]',
+  ];
 
-  // Try structured data (JSON-LD)
-  $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const data = JSON.parse($(el).html());
-      if (data['@type'] === 'Product' || data['@type'] === 'ItemList') {
-        console.log(`    Found JSON-LD structured data: ${data['@type']}`);
+  for (const sel of linkSelectors) {
+    $(sel).each((_, el) => {
+      const href = $(el).attr('href');
+      if (!href) return;
+      const fullUrl = href.startsWith('http') ? href : `https://www.roomandboard.com${href}`;
+      const text = $(el).text().trim().replace(/\s+/g, ' ');
+      if (text.length > 3 && !products.some(p => p.url === fullUrl)) {
+        products.push({ name: text.substring(0, 200), url: fullUrl, source: 'html-links' });
       }
-    } catch {}
-  });
+    });
+  }
 
-  // Try __NEXT_DATA__ or similar embedded JSON
-  $('script#__NEXT_DATA__').each((_, el) => {
-    try {
-      const data = JSON.parse($(el).html());
-      console.log('    Found __NEXT_DATA__ embedded data');
-    } catch {}
-  });
+  // Try product cards
+  const cardSelectors = [
+    '[data-testid*="product"]', '[data-testid*="Product"]',
+    '[class*="ProductCard"]', '[class*="product-card"]', '[class*="productCard"]',
+    '[class*="ProductTile"]', '[class*="product-tile"]', '[class*="productTile"]',
+    '[class*="ProductGrid"] > *', '[class*="product-grid"] > *',
+    '[class*="ClearanceItem"]', '[class*="clearance-item"]',
+    'article', '.grid-item', 'li[class*="product"]',
+  ];
+
+  for (const sel of cardSelectors) {
+    const cards = $(sel);
+    if (cards.length > 0) {
+      console.log(`    Found ${cards.length} elements matching: ${sel}`);
+      cards.each((_, el) => {
+        const name = $(el).find('h2, h3, h4, [class*="name"], [class*="Name"], [class*="title"], [class*="Title"]').first().text().trim().replace(/\s+/g, ' ');
+        const link = $(el).find('a').first().attr('href') || '';
+        const price = $(el).find('[class*="price"], [class*="Price"], [class*="sale"], [class*="Sale"]').first().text().trim().replace(/\s+/g, ' ');
+        const fullUrl = link.startsWith('http') ? link : link ? `https://www.roomandboard.com${link}` : '';
+        if (name && name.length > 3 && !products.some(p => p.name === name && p.url === fullUrl)) {
+          products.push({ name: name.substring(0, 200), url: fullUrl, price, source: 'html-cards' });
+        }
+      });
+      if (products.length > 0) break;
+    }
+  }
+
+  if (products.length === 0) {
+    // Log what we do see for debugging
+    const allClasses = new Set();
+    $('[class]').each((_, el) => {
+      const cls = $(el).attr('class');
+      if (cls) cls.split(/\s+/).forEach(c => { if (c.length > 3) allClasses.add(c); });
+    });
+    const relevant = [...allClasses].filter(c =>
+      /product|item|card|tile|grid|sofa|clearance|price|stock/i.test(c)
+    ).sort();
+    if (relevant.length > 0) {
+      console.log(`    Relevant CSS classes found: ${relevant.slice(0, 30).join(', ')}`);
+    }
+
+    // Log data-testid attributes
+    const testIds = [];
+    $('[data-testid]').each((_, el) => testIds.push($(el).attr('data-testid')));
+    const relevantTestIds = testIds.filter(id => /product|item|card|tile|grid|sofa|clearance|price/i.test(id));
+    if (relevantTestIds.length > 0) {
+      console.log(`    Relevant data-testid: ${relevantTestIds.slice(0, 20).join(', ')}`);
+    }
+  }
 
   return products.length > 0 ? products : null;
 }
 
-// ─── Strategy 2: Rebrowser (CDP-patched Puppeteer) ───
+// ─── Strategy 3: Room & Board internal API discovery ───
 
-async function tryRebrowser() {
-  console.log('  Strategy 2: Rebrowser (patched Puppeteer)...');
+async function tryInternalApis() {
+  console.log('  Strategy 3: Internal API discovery...');
 
-  let puppeteer;
-  try {
-    puppeteer = require('rebrowser-puppeteer-core');
-  } catch {
-    console.log('    rebrowser-puppeteer-core not available, trying puppeteer-extra...');
-    puppeteer = require('puppeteer-extra');
-    const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-    puppeteer.use(StealthPlugin());
-  }
-
-  const useHeaded = !!(process.env.DISPLAY || process.env.HEADED === 'true');
-
-  // Find Chromium executable
-  const execPath = findChromium();
-  if (!execPath) {
-    console.log('    No Chromium found');
-    return null;
-  }
-  console.log(`    Using: ${execPath}`);
-  console.log(`    Mode: ${useHeaded ? 'headed (xvfb)' : 'headless'}`);
-
-  const browser = await puppeteer.launch({
-    executablePath: execPath,
-    headless: useHeaded ? false : 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-dev-shm-usage',
-      '--disable-infobars',
-      '--window-size=1440,900',
-      '--lang=en-US',
-    ],
-  });
-
-  try {
-    const page = await browser.newPage();
-
-    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1440, height: 900 });
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-    });
-
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      window.chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
-      const originalQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (params) =>
-        params.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission })
-          : originalQuery(params);
-    });
-
-    // Visit homepage first
-    console.log('    Visiting homepage...');
-    await page.goto(HOMEPAGE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await randomDelay(2000, 4000);
-    await humanScrollPuppeteer(page);
-    await randomDelay(1000, 2000);
-
-    // Navigate to clearance page
-    console.log('    Navigating to clearance sofas...');
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await randomDelay(3000, 5000);
-
-    let bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
-
-    if (isBlocked(bodyText)) {
-      console.log('    Bot detection triggered, attempting challenge...');
-
-      // Try to solve Press & Hold
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const solved = await solvePxChallenge(page);
-        if (solved) {
-          const currentUrl = page.url();
-          if (!currentUrl.includes('clearance')) {
-            await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await randomDelay(3000, 5000);
-          }
-          bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
-          if (!isBlocked(bodyText)) break;
-        }
-        if (attempt < 2) {
-          console.log('    Retrying...');
-          await randomDelay(5000, 10000);
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-          await randomDelay(3000, 5000);
-          bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
-          if (!isBlocked(bodyText)) break;
-        }
-      }
-
-      if (isBlocked(bodyText)) {
-        console.log('    Still blocked after all attempts');
-        const screenshot = await page.screenshot({ fullPage: true }).catch(() => null);
-        await browser.close();
-        return { blocked: true, bodyPreview: bodyText.substring(0, 500), screenshot };
-      }
-    }
-
-    console.log('    Page loaded successfully!');
-    await humanScrollPuppeteer(page);
-    await randomDelay(1000, 2000);
-
-    // Wait for content to load
-    await page.waitForSelector('a[href*="/clearance/"]', { timeout: 15000 }).catch(() => {});
-    await randomDelay(1000, 2000);
-
-    return await scrapeProductsPuppeteer(page);
-  } finally {
-    await browser.close();
-  }
-}
-
-function findChromium() {
-  const fs = require('fs');
-  const paths = [
-    process.env.CHROMIUM_PATH,
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
+  const apiPaths = [
+    '/api/clearance/living/sofas-and-loveseats',
+    '/api/products/clearance/living/sofas-and-loveseats',
+    '/api/catalog/clearance/living/sofas-and-loveseats',
+    '/api/v1/products?category=clearance-living-sofas',
+    '/api/search?category=clearance&subcategory=sofas',
+    '/graphql',
   ];
 
-  // Check Playwright's installed browser
-  try {
-    const { execSync } = require('child_process');
-    const pwPath = execSync('npx playwright install --dry-run chromium 2>/dev/null || true', { encoding: 'utf8' });
-    // Try to find playwright's chromium
-    const homeDir = process.env.HOME || '/root';
-    const pwBrowsers = require('path').join(homeDir, '.cache', 'ms-playwright');
-    if (fs.existsSync(pwBrowsers)) {
-      const dirs = fs.readdirSync(pwBrowsers).filter(d => d.startsWith('chromium'));
-      for (const dir of dirs) {
-        const chromePath = require('path').join(pwBrowsers, dir, 'chrome-linux', 'chrome');
-        if (fs.existsSync(chromePath)) paths.push(chromePath);
-      }
-    }
-  } catch {}
-
-  for (const p of paths) {
-    if (p && require('fs').existsSync(p)) return p;
-  }
-  return null;
-}
-
-async function humanScrollPuppeteer(page) {
-  const scrolls = 2 + Math.floor(Math.random() * 3);
-  for (let i = 0; i < scrolls; i++) {
-    await page.evaluate(() => window.scrollBy(0, 200 + Math.random() * 400));
-    await randomDelay(300, 800);
-  }
-}
-
-async function solvePxChallenge(page) {
-  console.log('    Looking for Press & Hold button...');
-  await randomDelay(1000, 2000);
-
-  // Check all frames (PerimeterX uses iframes)
-  const frames = page.frames();
-  let targetFrame = page;
-
-  for (const frame of frames) {
+  for (const apiPath of apiPaths) {
     try {
-      const hasChallenge = await frame.evaluate(() =>
-        document.body?.innerText?.includes('Press & Hold')
-      ).catch(() => false);
-      if (hasChallenge && frame !== page.mainFrame()) {
-        targetFrame = frame;
-        console.log('    Found challenge in iframe');
-        break;
-      }
-    } catch {}
-  }
+      const url = `https://www.roomandboard.com${apiPath}`;
+      const isGraphQL = apiPath === '/graphql';
 
-  // Find the captcha element
-  const selectors = ['#px-captcha', '[id*="px-captcha"]', '[class*="px-captcha"]'];
-  let buttonBox = null;
+      const opts = {
+        method: isGraphQL ? 'POST' : 'GET',
+        headers: {
+          'User-Agent': MOBILE_UA,
+          'Accept': 'application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      };
 
-  for (const sel of selectors) {
-    try {
-      await targetFrame.waitForSelector(sel, { timeout: 3000 });
-      buttonBox = await targetFrame.$eval(sel, el => {
-        const rect = el.getBoundingClientRect();
-        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-      });
-      if (buttonBox && buttonBox.width > 0) {
-        console.log(`    Found: ${sel} (${buttonBox.width}x${buttonBox.height})`);
-        break;
-      }
-    } catch {}
-  }
-
-  if (!buttonBox) {
-    // Try broader selectors
-    for (const sel of ['[role="button"]', 'button']) {
-      try {
-        const buttons = await targetFrame.$$(sel);
-        for (const btn of buttons) {
-          const text = await btn.evaluate(el => el.textContent || '');
-          if (text.includes('Press') || text.includes('Hold')) {
-            buttonBox = await btn.evaluate(el => {
-              const rect = el.getBoundingClientRect();
-              return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-            });
-            console.log(`    Found via text: ${sel}`);
-            break;
-          }
-        }
-        if (buttonBox) break;
-      } catch {}
-    }
-  }
-
-  if (!buttonBox || buttonBox.width === 0) {
-    console.log('    Could not find challenge button');
-    return false;
-  }
-
-  const centerX = buttonBox.x + buttonBox.width / 2;
-  const centerY = buttonBox.y + buttonBox.height / 2;
-
-  // Move mouse naturally to button
-  const steps = 10 + Math.floor(Math.random() * 10);
-  let curX = 200 + Math.random() * 400;
-  let curY = 200 + Math.random() * 300;
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const jx = (Math.random() - 0.5) * 5;
-    const jy = (Math.random() - 0.5) * 5;
-    curX = curX + (centerX - curX) * t + jx;
-    curY = curY + (centerY - curY) * t + jy;
-    await page.mouse.move(curX, curY);
-    await randomDelay(15, 45);
-  }
-  await page.mouse.move(centerX, centerY);
-  await randomDelay(200, 500);
-
-  // Press and hold
-  console.log('    Pressing and holding...');
-  await page.mouse.down();
-
-  const holdMs = 6000 + Math.random() * 4000;
-  const microMoves = 15 + Math.floor(Math.random() * 10);
-  for (let i = 0; i < microMoves; i++) {
-    await page.mouse.move(
-      centerX + (Math.random() - 0.5) * 3,
-      centerY + (Math.random() - 0.5) * 3,
-    );
-    await randomDelay(holdMs / microMoves * 0.8, holdMs / microMoves * 1.2);
-  }
-
-  await page.mouse.up();
-  console.log(`    Released after ~${Math.round(holdMs)}ms`);
-  await randomDelay(3000, 6000);
-
-  const afterText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
-  const solved = !isBlocked(afterText);
-  console.log(`    ${solved ? 'Challenge solved!' : 'Still blocked'}`);
-  return solved;
-}
-
-async function scrapeProductsPuppeteer(page) {
-  const productLinks = await page.evaluate(() => {
-    const seen = new Set();
-    const links = [];
-    document.querySelectorAll('a').forEach(a => {
-      const href = a.href;
-      if (!href || seen.has(href)) return;
-      if (href.includes('/clearance/') && href.split('/').length > 5) {
-        const text = a.textContent.trim().replace(/\s+/g, ' ').substring(0, 200);
-        if (text.length > 2) {
-          seen.add(href);
-          links.push({ href, text });
-        }
-      }
-    });
-    return links;
-  });
-
-  const gridProducts = await page.evaluate(() => {
-    const products = [];
-    const selectors = [
-      '[data-testid*="product"]',
-      '[class*="ProductCard"]', '[class*="product-card"]',
-      '[class*="productCard"]', '[class*="product-tile"]',
-      '[class*="ProductTile"]', '.grid-item',
-      'article', 'li[class*="product"]',
-    ];
-    for (const sel of selectors) {
-      const els = document.querySelectorAll(sel);
-      if (els.length > 0) {
-        els.forEach(el => {
-          const name = (
-            el.querySelector('h2, h3, h4, [class*="name"], [class*="Name"], [class*="title"], [class*="Title"]')?.textContent ||
-            el.querySelector('a')?.textContent || ''
-          ).trim().replace(/\s+/g, ' ');
-          const link = el.querySelector('a')?.href || '';
-          const priceEl = el.querySelector('[class*="price"], [class*="Price"], [class*="sale"], [class*="Sale"]');
-          const price = priceEl ? priceEl.textContent.trim().replace(/\s+/g, ' ') : '';
-          const stockEl = el.querySelector('[class*="stock"], [class*="Stock"], [class*="avail"], [class*="Avail"], [class*="badge"], [class*="Badge"]');
-          const stock = stockEl ? stockEl.textContent.trim() : '';
-          if (name && name.length > 3) products.push({ name, link, price, stock });
+      if (isGraphQL) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify({
+          query: `{ products(category: "clearance/living/sofas-and-loveseats") { name price url } }`,
         });
-        if (products.length > 0) break;
       }
-    }
-    return products;
-  });
 
-  // Deduplicate
-  const allLinks = new Map();
-  for (const p of gridProducts) {
-    if (p.link) allLinks.set(p.link, { name: p.name, price: p.price, stock: p.stock });
-  }
-  for (const p of productLinks) {
-    if (!allLinks.has(p.href)) allLinks.set(p.href, { name: p.text, price: '', stock: '' });
-  }
+      const resp = await fetch(url, opts);
+      const contentType = resp.headers.get('content-type') || '';
 
-  if (allLinks.size === 0) {
-    const debugText = await page.evaluate(() => document.body.innerText.substring(0, 3000));
-    console.log('[DEBUG] No product links found. Page text:');
-    console.log(debugText);
-  }
-
-  // Visit each product for stock detail
-  const detailed = [];
-  for (const [url, info] of allLinks) {
-    try {
-      console.log(`    Checking: ${info.name || url}`);
-      await randomDelay(1500, 3000);
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await randomDelay(2000, 3500);
-      await humanScrollPuppeteer(page);
-
-      const detail = await page.evaluate(() => {
-        const getText = (...sels) => {
-          for (const s of sels) { const el = document.querySelector(s); if (el) return el.textContent.trim().replace(/\s+/g, ' '); }
-          return '';
-        };
-        const name = getText('h1', '[class*="productName"]', '[class*="product-name"]');
-        const price = getText('[class*="salePrice"]', '[class*="sale-price"]', '[class*="price"]', '[class*="Price"]');
-        const originalPrice = getText('[class*="originalPrice"]', '[class*="original-price"]', 'del', 's');
-        let stockInfo = '';
-        for (const s of ['[class*="stock"]', '[class*="Stock"]', '[class*="avail"]', '[class*="Avail"]', '[class*="badge"]', '[class*="Badge"]', '[class*="remaining"]']) {
-          const el = document.querySelector(s);
-          if (el) { const t = el.textContent.trim(); if (t.length > 0 && t.length < 200) stockInfo += (stockInfo ? ' | ' : '') + t; }
+      if (resp.ok && contentType.includes('json')) {
+        const data = await resp.json();
+        console.log(`    ${apiPath}: 200 JSON (${JSON.stringify(data).length} bytes)`);
+        const products = extractProductsFromJson(data);
+        if (products.length > 0) {
+          console.log(`    Found ${products.length} products from API`);
+          return products;
         }
-        const addToCart = document.querySelector('button[class*="addToCart"], button[class*="add-to-cart"]');
-        const canAddToCart = addToCart ? !addToCart.disabled : null;
-        const bodyText = document.body.innerText;
-        const qtyMatch = bodyText.match(/only\s+(\d+)\s+(left|available|remaining|in stock)/i) || bodyText.match(/(\d+)\s+(left|remaining|in stock|available)/i);
-        const qtyFromText = qtyMatch ? parseInt(qtyMatch[1]) : null;
-        return { name, price, originalPrice, stockInfo, canAddToCart, qtyFromText, url: window.location.href };
-      });
-
-      detailed.push({ ...detail, name: detail.name || info.name, listingPrice: info.price, listingStock: info.stock });
-    } catch (err) {
-      console.log(`    Error: ${err.message}`);
-      detailed.push({ name: info.name, url, price: info.price, error: err.message });
-    }
+      } else if (resp.status !== 404 && resp.status !== 403) {
+        console.log(`    ${apiPath}: ${resp.status} ${contentType}`);
+      }
+    } catch {}
   }
 
-  return detailed;
-}
-
-function isBlocked(text) {
-  return text.includes('Just Checking') ||
-         text.includes("confirm you're human") ||
-         text.includes('Press & Hold') ||
-         text.includes('Before we continue');
+  return null;
 }
 
 // ─── Email formatting ───
@@ -497,16 +415,17 @@ function formatEmailHtml(products, timestamp) {
     } else {
       const parts = [];
       if (p.stockInfo) parts.push(p.stockInfo);
-      if (p.canAddToCart !== null) parts.push(p.canAddToCart ? 'Can add to cart' : 'Cannot add to cart');
-      if (p.qtyFromText !== null) parts.push(`${p.qtyFromText} available`);
-      if (p.listingStock) parts.push(p.listingStock);
+      if (p.canAddToCart !== null && p.canAddToCart !== undefined) parts.push(p.canAddToCart ? 'Can add to cart' : 'Cannot add to cart');
+      if (p.qtyFromText !== null && p.qtyFromText !== undefined) parts.push(`${p.qtyFromText} available`);
+      if (p.sku) parts.push(`SKU: ${p.sku}`);
       if (p.source) parts.push(`via ${p.source}`);
       stockDisplay = parts.length > 0 ? parts.join(' &bull; ') : '<span style="color:#7f8c8d">No stock info found</span>';
     }
     const priceDisplay = p.price || p.listingPrice || 'N/A';
     const origPrice = p.originalPrice ? `<del style="color:#95a5a6">${p.originalPrice}</del> ` : '';
+    const nameHtml = p.url ? `<a href="${p.url}" style="color:#2980b9;text-decoration:none;font-weight:600">${p.name || 'Unknown'}</a>` : (p.name || 'Unknown');
     return `<tr style="border-bottom:1px solid #ecf0f1">
-        <td style="padding:12px 8px;vertical-align:top"><a href="${p.url}" style="color:#2980b9;text-decoration:none;font-weight:600">${p.name || 'Unknown'}</a></td>
+        <td style="padding:12px 8px;vertical-align:top">${nameHtml}</td>
         <td style="padding:12px 8px;vertical-align:top;white-space:nowrap">${origPrice}${priceDisplay}</td>
         <td style="padding:12px 8px;vertical-align:top">${stockDisplay}</td></tr>`;
   }).join('\n');
@@ -528,9 +447,9 @@ function formatEmailHtml(products, timestamp) {
 
 function formatBlockedEmailHtml(bodyPreview, timestamp) {
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto">
-      <h2 style="color:#c0392b;border-bottom:2px solid #e74c3c;padding-bottom:8px">⚠ Room & Board — Bot Detection Triggered</h2>
+      <h2 style="color:#c0392b;border-bottom:2px solid #e74c3c;padding-bottom:8px">Room & Board — Bot Detection</h2>
       <p style="color:#7f8c8d;font-size:14px">Checked at ${timestamp}</p>
-      <p>All strategies failed to bypass PerimeterX bot detection. Strategies tried: direct HTTP fetch (Googlebot/Desktop/Mobile UAs), rebrowser-patched Puppeteer with stealth + challenge solving.</p>
+      <p>All strategies failed. Strategies tried: Next.js data API, HTML parsing, internal API discovery.</p>
       <details><summary>Page text preview</summary>
         <pre style="background:#f8f9fa;padding:12px;border-radius:4px;font-size:12px;white-space:pre-wrap">${bodyPreview}</pre>
       </details>
@@ -543,7 +462,7 @@ async function sendEmail(result) {
   let subject, html, attachments = [];
 
   if (result && result.blocked) {
-    subject = `⚠ Clearance Sofas: Blocked by bot detection — ${timestamp}`;
+    subject = `Clearance Sofas: Blocked — ${timestamp}`;
     html = formatBlockedEmailHtml(result.bodyPreview || '', timestamp);
     if (result.screenshot) attachments.push({ filename: 'blocked-page.png', content: result.screenshot });
   } else {
@@ -563,14 +482,22 @@ async function run() {
   console.log(`\n[${timestamp}] Checking Room & Board clearance sofas...`);
 
   try {
-    // Strategy 1: Direct HTTP fetch (fastest, no browser)
-    let result = await tryDirectFetch();
+    // Strategy 1: Next.js data API / __NEXT_DATA__ (fastest, most reliable)
+    let result = await tryNextDataApi();
     if (result && Array.isArray(result) && result.length > 0) {
       console.log(`  Strategy 1 succeeded: ${result.length} product(s)`);
     } else {
-      console.log('  Strategy 1: no products found, trying browser...');
-      // Strategy 2: Rebrowser-patched Puppeteer
-      result = await tryRebrowser();
+      // Strategy 3: Try internal APIs
+      console.log('  Strategy 1 found nothing, trying internal APIs...');
+      result = await tryInternalApis();
+      if (result && Array.isArray(result) && result.length > 0) {
+        console.log(`  Strategy 3 succeeded: ${result.length} product(s)`);
+      }
+    }
+
+    if (!result || (Array.isArray(result) && result.length === 0)) {
+      console.log('  No products found through any strategy');
+      result = [];
     }
 
     if (result && result.blocked) {
@@ -578,8 +505,8 @@ async function run() {
     } else if (Array.isArray(result)) {
       console.log(`  Found ${result.length} product(s)`);
       result.forEach(p => {
-        const stock = [p.stockInfo, p.canAddToCart !== null ? (p.canAddToCart ? 'Purchasable' : 'Not purchasable') : '', p.qtyFromText ? `${p.qtyFromText} avail` : ''].filter(Boolean).join(' | ');
-        console.log(`    - ${p.name || 'Unknown'}: ${p.price || 'N/A'} [${stock || 'no stock info'}]`);
+        const stock = p.stockInfo || 'no stock info';
+        console.log(`    - ${p.name || 'Unknown'}: ${p.price || 'N/A'} [${stock}] ${p.source || ''}`);
       });
     }
 

@@ -7,16 +7,16 @@
     "start": "node monitor.js",
     "check": "node monitor.js --once"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jzselby/roomboard"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
-    "nodemailer": "^9.0.3",
-    "playwright-core": "^1.61.1",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "rebrowser-puppeteer-core": "^24.8.1"
+    "nodemailer": "^9.0.3"
   }
 }
