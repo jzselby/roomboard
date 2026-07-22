@@ -30,7 +30,11 @@ function extractProductsFromNextData(nextData) {
     url: `https://www.roomandboard.com/clearance/living/sofas-and-loveseats/${p.url || p.articleNumber}`,
     stockInfo: p.status?.status || '',
     sku: p.articleNumber || '',
-  })).filter(p => p.name);
+  })).filter(p => {
+    if (!p.name) return false;
+    const priceNum = parseFloat(p.price.replace(/[$,]/g, ''));
+    return isNaN(priceNum) || priceNum < 2000;
+  });
 }
 
 async function fetchProducts() {
@@ -84,7 +88,7 @@ function formatEmailHtml(products, timestamp) {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="color:#95a5a6;font-size:12px;margin-top:20px"><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a> &bull; Next check in 10 minutes</p>
+      <p style="color:#95a5a6;font-size:12px;margin-top:20px"><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a> &bull; Next check in 1 hour</p>
     </div>`;
 }
 
