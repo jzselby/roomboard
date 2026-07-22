@@ -17,23 +17,9 @@ jobs:
 
       - run: npm install
 
-      - run: npx playwright install chromium --with-deps
-
-      - name: Diagnostic - curl test
-        run: |
-          echo "=== Testing direct HTTP access ==="
-          curl -s -o /dev/null -w "Status: %{http_code}, Size: %{size_download} bytes, Redirect: %{redirect_url}\n" \
-            -H "User-Agent: Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" \
-            "https://www.roomandboard.com/clearance/living/sofas-and-loveseats" || true
-          curl -s -o /dev/null -w "Status: %{http_code}, Size: %{size_download} bytes\n" \
-            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36" \
-            "https://www.roomandboard.com/clearance/living/sofas-and-loveseats" || true
-
       - name: Check clearance sofas
-        run: xvfb-run --auto-servernum node monitor.js --once
+        run: node monitor.js --once
         env:
-          DISPLAY: ':99'
-          HEADED: 'true'
           SMTP_HOST: smtp.gmail.com
           SMTP_PORT: '465'
           SMTP_SECURE: 'true'
