@@ -18,10 +18,11 @@ jobs:
       - run: npm install
 
       - name: Restore seen sofas
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: seen.json
-          key: seen-sofas
+          key: seen-sofas-${{ github.run_id }}
+          restore-keys: seen-sofas-
 
       - name: Check clearance sofas
         run: node monitor.js --once
@@ -39,4 +40,4 @@ jobs:
         if: always()
         with:
           path: seen.json
-          key: seen-sofas
+          key: seen-sofas-${{ github.run_id }}
