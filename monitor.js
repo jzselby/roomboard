@@ -1,5 +1,9 @@
 require('dotenv').config();
 const nodemailer = require('nodemailer');
+const fs = require('fs');
+const path = require('path');
+
+const SEEN_FILE = path.join(process.env.GITHUB_WORKSPACE || '.', 'seen.json');
 
 const TARGET_URL = 'https://www.roomandboard.com/clearance/living/sofas-and-loveseats';
 const INTERVAL_MS = 10 * 60 * 1000;
@@ -40,6 +44,29 @@ function extractProductsFromNextData(nextData) {
   });
 }
 
+function loadSeen() {
+  try {
+    return new Set(JSON.parse(fs.readFileSync(SEEN_FILE, 'utf8')));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSeen(products) {
+  const skus = products.map(p => p.sku).filter(Boolean);
+  const prev = loadSeen();
+  skus.forEach(s => prev.add(s));
+  fs.writeFileSync(SEEN_FILE, JSON.stringify([...prev], null, 2));
+}
+
+function flagNewProducts(products) {
+  const seen = loadSeen();
+  return products.map(p => ({
+    ...p,
+    isNew: p.sku && !seen.has(p.sku),
+  }));
+}
+
 async function fetchProducts() {
   console.log('  Fetching page with mobile UA...');
   const resp = await fetch(TARGET_URL, {
@@ -73,7 +100,8 @@ function formatEmailHtml(products, timestamp) {
     const stockDisplay = p.stockInfo || '<span style="color:#7f8c8d">—</span>';
     const priceDisplay = p.price || 'N/A';
     const origPrice = p.originalPrice ? `<del style="color:#95a5a6">${p.originalPrice}</del> ` : '';
-    const nameHtml = `<a href="${p.url}" style="color:#2980b9;text-decoration:none;font-weight:600">${p.name}</a>`;
+    const newBadge = p.isNew ? '<span style="background:#e74c3c;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:700;margin-right:6px">NEW</span>' : '';
+    const nameHtml = `${newBadge}<a href="${p.url}" style="color:#2980b9;text-decoration:none;font-weight:600">${p.name}</a>`;
     return `<tr style="border-bottom:1px solid #ecf0f1">
         <td style="padding:12px 8px;vertical-align:top">${nameHtml}</td>
         <td style="padding:12px 8px;vertical-align:top;white-space:nowrap">${origPrice}${priceDisplay}</td>
@@ -104,7 +132,10 @@ async function sendEmail(result) {
     html = `<p>Bot detection triggered. Will retry on next scheduled run.</p>`;
   } else {
     const products = Array.isArray(result) ? result : [];
-    subject = `Clearance Sofas: ${products.length} items — ${timestamp}`;
+    const newCount = products.filter(p => p.isNew).length;
+    subject = newCount > 0
+      ? `Clearance Sofas: ${newCount} NEW + ${products.length} total — ${timestamp}`
+      : `Clearance Sofas: ${products.length} items — ${timestamp}`;
     html = formatEmailHtml(products, timestamp);
   }
 
@@ -122,14 +153,17 @@ async function run() {
   console.log(`\n[${timestamp}] Checking Room & Board clearance sofas...`);
 
   try {
-    const result = await fetchProducts();
+    let result = await fetchProducts();
 
     if (result && result.blocked) {
       console.log('  Blocked by bot detection');
     } else if (Array.isArray(result)) {
-      console.log(`  Found ${result.length} product(s)`);
+      result = flagNewProducts(result);
+      const newCount = result.filter(p => p.isNew).length;
+      console.log(`  Found ${result.length} product(s), ${newCount} new`);
       result.forEach(p => {
-        console.log(`    - ${p.name}: ${p.price || 'N/A'} [${p.stockInfo || 'no status'}]`);
+        const tag = p.isNew ? ' [NEW]' : '';
+        console.log(`    - ${p.name}: ${p.price || 'N/A'} [${p.stockInfo || 'no status'}]${tag}`);
       });
     }
 
@@ -137,6 +171,10 @@ async function run() {
       await sendEmail(result);
     } else {
       console.log('  [SKIP] Email not configured');
+    }
+
+    if (Array.isArray(result)) {
+      saveSeen(result);
     }
   } catch (err) {
     console.error(`  Error: ${err.message}`);

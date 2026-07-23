@@ -14,7 +14,7 @@ npx playwright install chromium
 # 3. Copy and fill in your email config
 cp .env.example .env
 # Edit .env with your Gmail address and App Password
-# (Create one at: myaccount.google.com → Security → 2-Step Verification → App passwords)
+# (Create one at: myaccount.google.com > Security > 2-Step Verification > App passwords)
 ```
 
 ## Usage

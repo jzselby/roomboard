@@ -17,6 +17,12 @@ jobs:
 
       - run: npm install
 
+      - name: Restore seen sofas
+        uses: actions/cache@v4
+        with:
+          path: seen.json
+          key: seen-sofas
+
       - name: Check clearance sofas
         run: node monitor.js --once
         env:
@@ -27,3 +33,10 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
           TZ: America/Chicago
+
+      - name: Save seen sofas
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: seen.json
+          key: seen-sofas
