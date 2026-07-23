@@ -119,7 +119,7 @@ function formatEmailHtml(products, timestamp) {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="color:#95a5a6;font-size:12px;margin-top:20px"><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a> &bull; Next check in 1 hour</p>
+      <p style="color:#95a5a6;font-size:12px;margin-top:20px"><a href="${TARGET_URL}" style="color:#3498db">View on Room & Board</a> &bull; Next check in 6 hours</p>
     </div>`;
 }
 
