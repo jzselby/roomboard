@@ -5,7 +5,9 @@
   "main": "monitor.js",
   "scripts": {
     "start": "node monitor.js",
-    "check": "node monitor.js --once"
+    "check": "node monitor.js --once",
+    "flood": "node flood-monitor.js",
+    "flood:once": "node flood-monitor.js --once"
   },
   "repository": {
     "type": "git",
