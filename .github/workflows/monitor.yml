@@ -1,8 +1,10 @@
 name: Sofa Monitor
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
+  # Paused — no longer looking for a sofa.
+  # To resume, uncomment the schedule below.
+  # schedule:
+  #   - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
